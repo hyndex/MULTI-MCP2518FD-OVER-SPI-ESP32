@@ -1,3 +1,5 @@
+// mcp2518fd.h
+
 #ifndef MCP2518FD_H
 #define MCP2518FD_H
 
@@ -61,6 +63,7 @@ typedef struct {
     uint8_t rx_fifo_size;                              // RX FIFO Size (number of messages)
     QueueHandle_t rx_queue;                            // FreeRTOS Queue Handle for RX Messages
     uint8_t rx_queue_size;                             // RX Queue Size
+    bool canfd_enabled;                                // Enable CAN FD Operation
 } mcp2518fd_config_t;
 
 // MCP2518FD Device Handle

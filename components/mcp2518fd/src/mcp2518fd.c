@@ -1,3 +1,5 @@
+// mcp2518fd.c
+
 #include "mcp2518fd.h"
 #include "esp_log.h"
 #include "driver/spi_common.h"
@@ -235,6 +237,15 @@ static mcp2518fd_error_t set_operation_mode(mcp2518fd_t *dev, mcp2518fd_mode_t m
 
     con &= ~(0x07 << 21);            // Clear Operation Mode bits
     con |= ((mode & 0x07) << 21);    // Set new mode
+
+    // Enable or disable CAN FD operation based on mode
+    if (dev->config.canfd_enabled) {
+        con &= ~(1 << 29); // Clear CANFDEN bit
+        con |= (1 << 29);  // Enable CAN FD
+    } else {
+        con &= ~(1 << 29); // Disable CAN FD
+    }
+
     err = write_register(dev, REG_CiCON, con);
     if (err != MCP2518FD_OK) {
         return err;
@@ -285,29 +296,31 @@ static mcp2518fd_error_t configure_bit_timing(mcp2518fd_t *dev) {
         return err;
     }
 
-    // Calculate Data Bit Timing
-    uint32_t brp_d, tseg1_d, tseg2_d, sjw_d;
-    result = calculate_bit_timing(sysclk, data_bitrate, &brp_d, &tseg1_d, &tseg2_d, &sjw_d);
-    if (!result) {
-        ESP_LOGE(TAG, "Failed to calculate data bit timing");
-        return MCP2518FD_CONFIG_ERROR;
-    }
+    // If CAN FD is enabled, configure Data Bit Timing
+    if (dev->config.canfd_enabled) {
+        uint32_t brp_d, tseg1_d, tseg2_d, sjw_d;
+        result = calculate_bit_timing(sysclk, data_bitrate, &brp_d, &tseg1_d, &tseg2_d, &sjw_d);
+        if (!result) {
+            ESP_LOGE(TAG, "Failed to calculate data bit timing");
+            return MCP2518FD_CONFIG_ERROR;
+        }
 
-    uint32_t dbtcfg = ((sjw_d & 0x0F) << 24) |
-                      ((tseg2_d & 0x0F) << 16) |
-                      ((tseg1_d & 0x1F) << 8) |
-                      (brp_d & 0x1F);
+        uint32_t dbtcfg = ((sjw_d & 0x0F) << 24) |
+                          ((tseg2_d & 0x0F) << 16) |
+                          ((tseg1_d & 0x1F) << 8) |
+                          (brp_d & 0x1F);
 
-    err = write_register(dev, REG_CiDBTCFG, dbtcfg);
-    if (err != MCP2518FD_OK) {
-        return err;
-    }
+        err = write_register(dev, REG_CiDBTCFG, dbtcfg);
+        if (err != MCP2518FD_OK) {
+            return err;
+        }
 
-    // Configure Transmitter Delay Compensation (Optional)
-    uint32_t tdc = 0x00000000; // Disable TDC
-    err = write_register(dev, REG_CiTDC, tdc);
-    if (err != MCP2518FD_OK) {
-        return err;
+        // Configure Transmitter Delay Compensation (Optional)
+        uint32_t tdc = 0x00000000; // Disable TDC
+        err = write_register(dev, REG_CiTDC, tdc);
+        if (err != MCP2518FD_OK) {
+            return err;
+        }
     }
 
     return MCP2518FD_OK;
@@ -498,6 +511,12 @@ static mcp2518fd_error_t read_message_from_fifo(mcp2518fd_t *dev, mcp2518fd_mess
     message->brs = (flags & 0x40) ? true : false;
     message->esi = (flags & 0x20) ? true : false;
 
+    // If CAN FD is disabled, force fd_frame to false
+    if (!dev->config.canfd_enabled) {
+        message->fd_frame = false;
+        message->brs = false;
+    }
+
     // Copy Data
     memcpy(message->data, ptr + 8, length);
 
@@ -555,33 +574,44 @@ static mcp2518fd_error_t write_message_to_fifo(mcp2518fd_t *dev, const mcp2518fd
     // DLC and Flags
     uint8_t dlc = message->dlc;
     uint8_t length_code = 0;
-    if (dlc <= 8) {
-        length_code = dlc;
-    } else if (dlc <= 12) {
-        length_code = 9;
-    } else if (dlc <= 16) {
-        length_code = 10;
-    } else if (dlc <= 20) {
-        length_code = 11;
-    } else if (dlc <= 24) {
-        length_code = 12;
-    } else if (dlc <= 32) {
-        length_code = 13;
-    } else if (dlc <= 48) {
-        length_code = 14;
+    if (dev->config.canfd_enabled) {
+        // CAN FD DLC encoding
+        if (dlc <= 8) {
+            length_code = dlc;
+        } else if (dlc <= 12) {
+            length_code = 9;
+        } else if (dlc <= 16) {
+            length_code = 10;
+        } else if (dlc <= 20) {
+            length_code = 11;
+        } else if (dlc <= 24) {
+            length_code = 12;
+        } else if (dlc <= 32) {
+            length_code = 13;
+        } else if (dlc <= 48) {
+            length_code = 14;
+        } else {
+            length_code = 15;
+        }
     } else {
-        length_code = 15;
+        // Classical CAN DLC encoding
+        if (dlc <= 8) {
+            length_code = dlc;
+        } else {
+            ESP_LOGE(TAG, "DLC exceeds 8 bytes for Classical CAN");
+            return MCP2518FD_INVALID_ARGUMENT;
+        }
     }
 
     ptr[4] = length_code & 0x0F;
     ptr[5] = 0;
-    if (message->fd_frame) {
+    if (message->fd_frame && dev->config.canfd_enabled) {
         ptr[5] |= 0x80; // FDF
     }
-    if (message->brs) {
+    if (message->brs && dev->config.canfd_enabled) {
         ptr[5] |= 0x40; // BRS
     }
-    if (message->esi) {
+    if (message->esi && dev->config.canfd_enabled) {
         ptr[5] |= 0x20; // ESI
     }
     // Time Stamp (optional)
@@ -774,7 +804,7 @@ mcp2518fd_error_t mcp2518fd_configure_filter(mcp2518fd_t *dev, uint8_t filter_nu
 
 // Set Baud Rates
 mcp2518fd_error_t mcp2518fd_set_baud_rates(mcp2518fd_t *dev, uint32_t nominal_bitrate, uint32_t data_bitrate) {
-    if (dev == NULL || nominal_bitrate == 0 || data_bitrate == 0) {
+    if (dev == NULL || nominal_bitrate == 0 || (data_bitrate == 0 && dev->config.canfd_enabled)) {
         return MCP2518FD_INVALID_ARGUMENT;
     }
 

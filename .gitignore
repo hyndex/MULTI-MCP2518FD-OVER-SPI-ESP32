@@ -1,0 +1,31 @@
+# ESP-IDF build files
+/build/
+/sdkconfig
+/sdkconfig.old
+
+# Object files
+*.o
+*.obj
+*.elf
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Debug files
+*.dSYM/
+*.map
+*.bin
+*.hex
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Logs
+*.log
+
+# Other
+.DS_Store
+Thumbs.db
